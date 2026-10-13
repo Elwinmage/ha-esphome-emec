@@ -34,6 +34,7 @@ going through a USR-TCP232 gateway and a Home Assistant integration.
 - [Use it in your ESPHome YAML](#use-it-in-your-esphome-yaml)
 - [Configuration reference](#configuration-reference)
 - [Entities](#entities)
+- [Abnormal readings filter](#abnormal-readings-filter)
 - [Protocol notes](#protocol-notes)
 - [Troubleshooting](#troubleshooting)
 - [Testing without the controller](#testing-without-the-controller)
@@ -183,6 +184,8 @@ external_components:
 | `heartbeat_interval` | `500ms` | Keepalive period. Leave it unless you know better. |
 | `startup_delay` | `2s` | Heartbeat-only period after boot, before the first query. |
 | `prefix` | `"34"` | Protocol family prefix, 2 characters. |
+| `ph_filter` | `threshold: 1.0`, `max_outliers: 3` | Abnormal pH readings filter, see [below](#abnormal-readings-filter). `threshold: 0` disables it. |
+| `redox_filter` | `threshold: 50`, `max_outliers: 3` | Same for Redox (threshold in mV). |
 | `tau` | `0` | Trailing field of the `paramw` write. It cannot be read back, so this value is sent with every *passcode / feeding delay / priority* change. |
 
 Several controllers (each on its own UART) can be declared: give each `emec:`
@@ -220,6 +223,8 @@ source).
 | `alarm_chlorine_empty` | Chlorine reservoir empty (`a2`) |
 | `alarm_no_flow` | No flow (`a3`) |
 | `standby` | Standby (`a8`) |
+| `ph_outlier_alarm` | pH stayed abnormal longer than the filter tolerates |
+| `redox_outlier_alarm` | Redox stayed abnormal longer than the filter tolerates |
 | `alarm_4` … `alarm_7` | Unidentified alarm bits |
 | `output_1` … `output_3` | Output states |
 | `dosing_alarm_ph_enabled`, `dosing_alarm_redox_enabled` | Dosing alarm threshold > 0 |
@@ -264,8 +269,50 @@ source).
 
 | Key | Description | Writes via |
 |-----|-------------|------------|
-| `reset_alarms` | Clears the latched alarms | `resalw` |
+| `reset_alarms` | Clears the latched alarms and re-arms the abnormal readings filter | `resalw` |
 | `sync_clock` | Pushes the ESP time to the controller (needs `time_id`) | `clockw` |
+
+---
+
+## Abnormal readings filter
+
+A probe or a long cable sometimes returns an absurd value for one or two
+readings. The live `ph` and `redox` sensors are filtered against the **last
+normal reading**:
+
+1. a reading within `threshold` of it is normal: it is published and becomes
+   the new reference (slow drifts are followed);
+2. a reading further away is **ignored** (not published, the sensor keeps its
+   last value) and a warning is logged;
+3. if the readings come back to normal within `max_outliers` readings, the
+   spike is simply dropped;
+4. if they are still off after `max_outliers` readings, the deviation is
+   considered real: `ph_outlier_alarm` / `redox_outlier_alarm` turns **ON** and
+   the readings are published again so you see the real value.
+
+The alarm turns OFF by itself as soon as the value comes back within
+`threshold` of the last normal reading. If the new level is expected (probe
+replaced or calibrated), press **Reset alarms**: the current reading becomes
+the new reference.
+
+With the defaults (`±1.0` pH, `±50 mV`, `max_outliers: 3`) and a 10 s
+`update_interval`, a deviation has to last 40 s (4 readings) to raise the
+alarm.
+
+```yaml
+emec:
+  id: wdphrh
+  uart_id: rs485
+  ph_filter:
+    threshold: 1.0     # pH units, 0 = disabled
+    max_outliers: 3    # off readings dropped before the alarm
+  redox_filter:
+    threshold: 50      # mV, 0 = disabled
+    max_outliers: 3
+```
+
+The filter only acts on what is published: the controller still regulates on
+its own readings.
 
 ---
 
@@ -318,6 +365,7 @@ The protocol core is unit-tested off-target against a simulated controller:
 
 ```bash
 g++ -std=c++17 -Wall -Wextra -I components/emec tests/test_protocol.cpp -o /tmp/emec_test && /tmp/emec_test
+g++ -std=c++17 -Wall -Wextra -I components/emec tests/test_filter.cpp -o /tmp/emec_filter && /tmp/emec_filter
 ```
 
 [`tests/pump_simulator.py`](tests/pump_simulator.py) emulates a WDPHRH on a
@@ -325,7 +373,8 @@ pseudo-terminal, which lets you run the whole component in an ESPHome `host:`
 build (`uart: port: /tmp/emec_pty`):
 
 ```bash
-python3 tests/pump_simulator.py --link /tmp/emec_pty
+python3 tests/pump_simulator.py --link /tmp/emec_pty --values /tmp/emec_values
+echo "7.23 655" > /tmp/emec_values   # edit while it runs to inject spikes
 ```
 
 ---

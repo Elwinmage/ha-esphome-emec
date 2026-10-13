@@ -14,6 +14,8 @@ DEPENDENCIES = ["emec"]
 EmecBinarySensor = emec_ns.class_("EmecBinarySensor", binary_sensor.BinarySensor)
 
 CONF_CONNECTED = "connected"
+CONF_PH_OUTLIER_ALARM = "ph_outlier_alarm"
+CONF_REDOX_OUTLIER_ALARM = "redox_outlier_alarm"
 
 
 def _alarm(icon, diagnostic=False):
@@ -64,6 +66,10 @@ CONFIG_SCHEMA = EMEC_PLATFORM_SCHEMA.extend(
             device_class=DEVICE_CLASS_CONNECTIVITY,
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
         ),
+        # ON when the reading stayed off by more than the filter threshold for
+        # more than `max_outliers` readings (see `ph_filter` / `redox_filter`).
+        cv.Optional(CONF_PH_OUTLIER_ALARM): _alarm("mdi:ph"),
+        cv.Optional(CONF_REDOX_OUTLIER_ALARM): _alarm("mdi:flash-alert"),
     }
 )
 
@@ -78,3 +84,9 @@ async def to_code(config):
     if CONF_CONNECTED in config:
         var = await binary_sensor.new_binary_sensor(config[CONF_CONNECTED])
         cg.add(hub.register_connected_listener(var))
+    if CONF_PH_OUTLIER_ALARM in config:
+        var = await binary_sensor.new_binary_sensor(config[CONF_PH_OUTLIER_ALARM])
+        cg.add(hub.register_ph_alarm_listener(var))
+    if CONF_REDOX_OUTLIER_ALARM in config:
+        var = await binary_sensor.new_binary_sensor(config[CONF_REDOX_OUTLIER_ALARM])
+        cg.add(hub.register_redox_alarm_listener(var))

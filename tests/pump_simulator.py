@@ -6,6 +6,10 @@ Lets you run the component without the real controller, e.g. with an ESPHome
 
     python3 tests/pump_simulator.py --link /tmp/emec_pty
 
+With --values FILE, the live readings are taken from FILE on every `valuer`
+query (two numbers: pH and Redox, e.g. "7.23 655"), so spikes and drifts can be
+injected by editing the file while it runs.
+
 It answers read queries, ACKs writes with "<cmd>okend", applies them to its
 internal state, and goes silent when the 500 ms heartbeat stops.
 """
@@ -49,6 +53,19 @@ WRITES = {
 }
 
 
+def live_values(path: str | None) -> None:
+    """Refresh pH / Redox from the --values file, if any."""
+    if not path:
+        return
+    try:
+        with open(path, encoding="ascii") as f:
+            ph, mv = f.read().split()[:2]
+        REGS["valuer"][0] = f"{round(float(ph) * 100):04d}"
+        REGS["valuer"][1] = f"{int(float(mv)):04d}"
+    except (OSError, ValueError):
+        pass
+
+
 def handle(line: str, state: dict) -> str | None:
     """Return the reply for one master frame (None = stay silent)."""
     now = time.monotonic()
@@ -61,6 +78,8 @@ def handle(line: str, state: dict) -> str | None:
     if not line.startswith(head):
         return None
     body = line[len(head):]
+    if body == "valuer":
+        live_values(state.get("values"))
     if body in REGS:
         return f"{PREFIX}gpd{SLAVE}&WD#" + "#".join(REGS[body]) + f"#{body}end\r"
     for cmd, (group, widths) in WRITES.items():
@@ -86,6 +105,7 @@ def handle(line: str, state: dict) -> str | None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--link", help="create this symlink to the pty slave")
+    ap.add_argument("--values", help='file holding live "pH Redox", re-read on each query')
     args = ap.parse_args()
 
     master, slave = pty.openpty()
@@ -98,7 +118,7 @@ def main() -> None:
         path = args.link
     print(f"EMEC WDPHRH simulator on {path} (38400 8N1)", flush=True)
 
-    buf, state = "", {}
+    buf, state = "", {"values": args.values}
     while True:
         ready, _, _ = select.select([master], [], [], 1.0)
         if not ready:

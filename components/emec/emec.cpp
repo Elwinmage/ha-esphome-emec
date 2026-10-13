@@ -47,6 +47,7 @@ void EmecComponent::loop() {
     bool updated = proto_.updated[g], force = proto_.force[g];
     proto_.updated[g] = false;
     proto_.force[g] = false;
+    if (g == emec_core::G_VALUER && updated) this->run_filters_();
     this->publish_group_((emec_core::Group) g, updated, force);
   }
 
@@ -89,6 +90,8 @@ void EmecComponent::publish_group_(emec_core::Group g, bool updated, bool force)
   for (auto &e : entries_) {
     if (e.field < def.first || e.field >= def.first + def.count) continue;
     if (!proto_.has(e.field)) continue;
+    // Spike filter: a held-back pH / Redox reading is not published at all.
+    if ((e.field == emec_core::F_PH && ph_hold_) || (e.field == emec_core::F_MV && mv_hold_)) continue;
     int v = proto_.value(e.field);
     if (force || !e.sent || v != e.last || (e.always && updated)) {
       e.sent = true;
@@ -96,6 +99,39 @@ void EmecComponent::publish_group_(emec_core::Group g, bool updated, bool force)
       e.listener->on_emec_value(v);
     }
   }
+}
+
+// One new live reading of pH and Redox: decide whether it is published.
+void EmecComponent::run_filters_() {
+  ph_hold_ = proto_.has(emec_core::F_PH) &&
+             ph_filter_.feed(proto_.value(emec_core::F_PH)) == emec_core::OutlierFilter::HOLD;
+  mv_hold_ = proto_.has(emec_core::F_MV) &&
+             mv_filter_.feed(proto_.value(emec_core::F_MV)) == emec_core::OutlierFilter::HOLD;
+  if (ph_hold_)
+    ESP_LOGW(TAG, "pH %.2f ignored: off by more than %.2f from %.2f (%u/%u)",
+             proto_.value(emec_core::F_PH) / 100.0f, ph_filter_.threshold / 100.0f,
+             ph_filter_.reference / 100.0f, (unsigned) ph_filter_.outliers, (unsigned) ph_filter_.max_outliers);
+  if (mv_hold_)
+    ESP_LOGW(TAG, "Redox %d mV ignored: off by more than %d from %d mV (%u/%u)",
+             proto_.value(emec_core::F_MV), mv_filter_.threshold, mv_filter_.reference,
+             (unsigned) mv_filter_.outliers, (unsigned) mv_filter_.max_outliers);
+  this->publish_filter_alarm_(ph_filter_, ph_alarm_last_, ph_alarm_sent_, ph_alarm_listeners_, "pH");
+  this->publish_filter_alarm_(mv_filter_, mv_alarm_last_, mv_alarm_sent_, mv_alarm_listeners_, "Redox");
+}
+
+void EmecComponent::publish_filter_alarm_(emec_core::OutlierFilter &f, bool &last, bool &sent,
+                                          std::vector<EmecListener *> &listeners, const char *what) {
+  if (sent && f.alarm == last) return;
+  if (sent || f.alarm) {
+    if (f.alarm) {
+      ESP_LOGW(TAG, "%s deviation confirmed after %u readings: alarm ON", what, (unsigned) f.max_outliers);
+    } else {
+      ESP_LOGI(TAG, "%s back to normal: alarm OFF", what);
+    }
+  }
+  sent = true;
+  last = f.alarm;
+  for (auto *l : listeners) l->on_emec_value(f.alarm ? 1 : 0);
 }
 
 void EmecComponent::register_listener(emec_core::Field field, EmecListener *l, bool always) {
@@ -113,7 +149,17 @@ bool EmecComponent::write_field(emec_core::Field field, int value) {
   return true;
 }
 
-bool EmecComponent::reset_alarms() { return proto_.reset_alarms(); }
+bool EmecComponent::reset_alarms() {
+  // The current pH / Redox level becomes the new reference (e.g. after a probe
+  // calibration) and the spike alarms are cleared.
+  ph_filter_.reset();
+  mv_filter_.reset();
+  ESP_LOGI(TAG, "spike filters re-armed: next pH / Redox readings become the reference");
+  ph_alarm_sent_ = mv_alarm_sent_ = false;
+  this->publish_filter_alarm_(ph_filter_, ph_alarm_last_, ph_alarm_sent_, ph_alarm_listeners_, "pH");
+  this->publish_filter_alarm_(mv_filter_, mv_alarm_last_, mv_alarm_sent_, mv_alarm_listeners_, "Redox");
+  return proto_.reset_alarms();
+}
 
 bool EmecComponent::sync_clock(int hour, int minute, int second, int day, int month, int year) {
   return proto_.sync_clock(hour, minute, second, day, month, year);
@@ -125,6 +171,18 @@ void EmecComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  Heartbeat: %u ms", (unsigned) proto_.hb_interval);
   ESP_LOGCONFIG(TAG, "  Startup delay: %u ms", (unsigned) proto_.prime_ms);
   ESP_LOGCONFIG(TAG, "  paramw tau: %u", (unsigned) proto_.tau);
+  if (ph_filter_.threshold > 0) {
+    ESP_LOGCONFIG(TAG, "  pH filter: +/-%.2f, alarm after %u readings", ph_filter_.threshold / 100.0f,
+                  (unsigned) ph_filter_.max_outliers);
+  } else {
+    ESP_LOGCONFIG(TAG, "  pH filter: disabled");
+  }
+  if (mv_filter_.threshold > 0) {
+    ESP_LOGCONFIG(TAG, "  Redox filter: +/-%d mV, alarm after %u readings", mv_filter_.threshold,
+                  (unsigned) mv_filter_.max_outliers);
+  } else {
+    ESP_LOGCONFIG(TAG, "  Redox filter: disabled");
+  }
   LOG_UPDATE_INTERVAL(this);
 }
 

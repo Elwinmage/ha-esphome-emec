@@ -63,6 +63,16 @@ emec:
   address: 1               # RS-485 slave address of the controller
   update_interval: 10s     # one full read cycle
   heartbeat_interval: 500ms
+  # Spike filters on the live readings (these are the defaults). A reading off
+  # by more than `threshold` from the last normal one is ignored; if it is
+  # still off after `max_outliers` readings, the outlier alarm turns ON.
+  # threshold: 0 disables the filter.
+  ph_filter:
+    threshold: 1.0
+    max_outliers: 3
+  redox_filter:
+    threshold: 50
+    max_outliers: 3
 
 sensor:
   - platform: emec
@@ -87,6 +97,10 @@ binary_sensor:
       name: "Chlorine reservoir empty"
     alarm_no_flow:
       name: "No flow"
+    ph_outlier_alarm:
+      name: "pH abnormal reading"
+    redox_outlier_alarm:
+      name: "Redox abnormal reading"
     standby:
       name: "Standby"
     output_1:
